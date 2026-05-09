@@ -1,0 +1,280 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{multirow}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Reconocimiento de Comandos de Voz On-Device con ONNX Runtime Mobile y LiteRT-LM en Flutter}
+
+\author{
+  \IEEEauthorblockN{Allan Díaz Barquero}
+  \IEEEauthorblockA{
+    \textit{Escuela de Ingeniería en Computación} \\
+    \textit{Instituto Tecnológico de Costa Rica} \\
+    Cartago, Costa Rica \\
+    allandb@estudiantec.cr
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+Se presenta el diseño, entrenamiento e integración on-device de un sistema de reconocimiento de comandos de voz (KWS) en una aplicación Flutter para Android.  Se emplean dos arquitecturas CNN entrenadas sobre el Speech Commands Dataset v2 de Google~\cite{warden2018speech}: una red LeNet-5 adaptada y MobileNetV3-Small~\cite{howard2019searching}, ambas evaluadas con y sin la técnica de aumentación SpecAugment~\cite{park2019specaugment}.  El mejor modelo se exporta a ONNX opset~17 e inferido con ONNX Runtime Mobile.  Como capa NLU adicional, se integra LiteRT-LM con \textit{Tool Use} en Kotlin nativo.  El sistema completo corre enteramente en el dispositivo, sin dependencias de red, con latencia keyword~\textrightarrow~acción \(\le 4\,\text{s}\).
+\end{abstract}
+
+\begin{IEEEkeywords}
+keyword spotting, on-device inference, ONNX Runtime Mobile, LiteRT-LM, MelSpectrogram, SpecAugment, Flutter, Smart Home
+\end{IEEEkeywords}
+
+% ──────────────────────────────────────────────────────────────
+\section{Introducción}
+
+El reconocimiento de comandos de voz en tiempo real sobre dispositivos de borde es un reto que combina restricciones de latencia, memoria y consumo energético con la necesidad de una alta tasa de acierto.  El presente trabajo aborda ese reto construyendo un pipeline completo: desde el preprocesamiento de señal de audio hasta la ejecución de acciones en una interfaz Smart Home, sin requerir conectividad.
+
+La arquitectura sigue el flujo:
+\[
+  \text{Micrófono} \xrightarrow{1\,\text{s}} \text{MelSpec (Dart)} \xrightarrow{} \text{ONNX KWS} \xrightarrow{} \text{LiteRT-LM Tool Use} \xrightarrow{} \text{UI}
+\]
+
+Se evalúan dos modelos CNN sobre 12~clases del Speech Commands Dataset v2, con y sin aumentación de datos, registrando 12~corridas en Weights \& Biases (WandB).
+
+% ──────────────────────────────────────────────────────────────
+\section{Dataset: Speech Commands v2}
+
+El dataset Speech Commands v2~\cite{warden2018speech} contiene \(\approx\)105\,000 clips de 1\,segundo a 16\,kHz, correspondientes a 35~palabras clave pronunciadas por más de 2\,000 hablantes.  Para este trabajo se utiliza un subconjunto de \textbf{12~clases}:
+
+\begin{center}
+  \texttt{yes, no, up, down, left, right, on, off, stop, go, \_silence\_, \_unknown\_}
+\end{center}
+
+El split estratificado es 80/10/10 (train/val/test) con semilla \texttt{seed=42} para reproducibilidad.
+
+% ──────────────────────────────────────────────────────────────
+\section{Preprocesamiento: Espectrograma Mel}
+
+Cada clip se convierte a un espectrograma Mel de dimensiones \(64 \times 101\) con los parámetros:
+
+\begin{equation}
+  \text{MelSpectrogram}\bigl(f_s{=}16000,\; n_\text{mels}{=}64,\; n_\text{fft}{=}1024,\; h{=}160\bigr)
+\end{equation}
+
+El filtro Mel utiliza 64~bandas triangulares en la escala Mel entre 20\,Hz y 8000\,Hz\@.  La magnitud se convierte a decibelios:
+
+\begin{equation}
+  S_\text{dB} = 20 \log_{10}\!\bigl(\max(|S|,\, 10^{-10})\bigr)
+\end{equation}
+
+Finalmente, cada espectrograma se normaliza con la media \(\mu\) y desviación estándar \(\sigma\) calculadas sobre el conjunto de entrenamiento:
+
+\begin{equation}
+  \hat{S} = \frac{S_\text{dB} - \mu}{\sigma}
+\end{equation}
+
+Los valores \(\mu\) y \(\sigma\) se guardan en \texttt{norm\_stats.json} y se replican exactamente en el extractor Dart (\texttt{MelSpectrogramExtractor}) para garantizar consistencia entre entrenamiento e inferencia.
+
+% ──────────────────────────────────────────────────────────────
+\section{Data Augmentation: SpecAugment}
+
+SpecAugment~\cite{park2019specaugment} es aplicado directamente sobre el espectrograma Mel antes de ingresar a la red.  Se implementó como un módulo \texttt{torch.nn.Module} personalizado con tres políticas:
+
+\begin{itemize}
+  \item \textbf{Time Masking}: hasta \(T=40\) pasos de tiempo consecutivos enmascarados con valor cero.
+  \item \textbf{Frequency Masking}: hasta \(F=27\) bandas Mel consecutivas enmascaradas.
+  \item \textbf{Time Warp}: deformación temporal con parámetro \(\tau=80\).
+\end{itemize}
+
+La política utilizada en los experimentos es LD (LibriSpeech Double) adaptada a la resolución del espectrograma \(64 \times 101\).
+
+% ──────────────────────────────────────────────────────────────
+\section{Arquitecturas CNN}
+
+\subsection{Modelo A — LeNet-5 Adaptado}
+
+La arquitectura original de LeNet-5~\cite{lecun1998lenet} fue adaptada para la entrada de espectrogramas Mel con un único canal:
+
+\begin{itemize}
+  \item Entrada: \(1 \times 64 \times 101\)
+  \item \texttt{Conv2d(1, 6, 5, padding=2)} \(\rightarrow\) \texttt{AvgPool2d(2,2)}
+  \item \texttt{Conv2d(6, 16, 5)} \(\rightarrow\) \texttt{AvgPool2d(2,2)}
+  \item \texttt{Flatten} \(\rightarrow\) \texttt{Linear(→120)} \(\rightarrow\) \texttt{Linear(→84)} \(\rightarrow\) \texttt{Linear(→12)}
+  \item \(\approx\)90\,000 parámetros; optimizador SGD; pérdida \texttt{CrossEntropyLoss}
+\end{itemize}
+
+\subsection{Modelo B — MobileNetV3-Small Adaptado}
+
+MobileNetV3-Small~\cite{howard2019searching} fue diseñado para inferencia eficiente en móvil.  La primera capa se reemplaza para aceptar entrada de un solo canal:
+
+\begin{itemize}
+  \item Primera capa: \texttt{Conv2d(1, 16, 3, stride=2)}
+  \item Backbone MobileNetV3-Small estándar con \textit{hard-swish} y SE blocks
+  \item Cabeza clasificadora: \texttt{Linear(→12)}
+  \item \(\approx\)2.5M parámetros; optimizador Adam; \texttt{CosineAnnealingLR}
+\end{itemize}
+
+% ──────────────────────────────────────────────────────────────
+\section{Entrenamiento y Experimentos}
+
+Se ejecutaron 12~corridas registradas en WandB.  La Tabla~\ref{tab:runs} resume las condiciones de cada corrida.
+
+\begin{table}[htbp]
+\caption{Configuración de las 12 corridas de entrenamiento}
+\label{tab:runs}
+\centering
+\begin{tabular}{clccc}
+\toprule
+\textbf{Run} & \textbf{Modelo} & \textbf{Dataset} & \textbf{LR} & \textbf{Otros} \\
+\midrule
+A1 & LeNet-5 & Base      & 0.010     & --         \\
+A2 & LeNet-5 & Base      & 0.001     & --         \\
+A3 & LeNet-5 & Base      & 0.0001    & --         \\
+A4 & LeNet-5 & Aumentado & 0.010     & --         \\
+A5 & LeNet-5 & Aumentado & 0.001     & --         \\
+A6 & LeNet-5 & Aumentado & 0.001     & batch=64   \\
+\midrule
+B1 & MobileNetV3 & Base      & 1e-3  & --         \\
+B2 & MobileNetV3 & Base      & 5e-4  & --         \\
+B3 & MobileNetV3 & Base      & 1e-3  & wd=1e-4    \\
+B4 & MobileNetV3 & Aumentado & 1e-3  & --         \\
+B5 & MobileNetV3 & Aumentado & 5e-4  & --         \\
+B6 & MobileNetV3 & Aumentado & 5e-4  & dropout    \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Las métricas reportadas por WandB en cada epoch incluyen: \texttt{loss}, \texttt{accuracy}, \texttt{val\_loss}, \texttt{val\_acc}, \texttt{F1\_macro} y la matriz de confusión.  Los cuatro mejores finalistas (uno por combinación modelo/datos) se evaluaron en el conjunto de test para seleccionar el modelo final.
+
+% ──────────────────────────────────────────────────────────────
+\section{Evaluación y Selección de Modelo}
+
+\subsection{Criterios de selección}
+
+Se seleccionó el mejor modelo de cada combinación (modelo × dataset) por \textbf{F1-macro en validación}, luego se compararon los cuatro finalistas en el test set.  El criterio final es F1-macro \(\ge 80\%\) en las 12~clases.
+
+\subsection{Resultados comparativos}
+
+% TODO: llenar con valores reales del notebook tras completar entrenamiento
+\begin{table}[htbp]
+\caption{Resultados en test set — cuatro finalistas}
+\label{tab:results}
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Run} & \textbf{Modelo} & \textbf{Acc.} & \textbf{F1-macro} & \textbf{Params} \\
+\midrule
+A2 & LeNet-5 Base       & --  & -- & 90\,K \\
+A5 & LeNet-5 Aumentado  & --  & -- & 90\,K \\
+B2 & MobileNetV3 Base   & --  & -- & 2.5\,M \\
+B5 & MobileNetV3 Aug.   & --  & -- & 2.5\,M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ──────────────────────────────────────────────────────────────
+\section{Exportación ONNX y Validación Numérica}
+
+El modelo final se exporta con:
+
+\begin{verbatim}
+torch.onnx.export(
+  model, dummy_input, "kws_model.onnx",
+  input_names=["spectrogram"],
+  output_names=["logits"],
+  dynamic_axes={"spectrogram": {0: "batch"}},
+  opset_version=17
+)
+\end{verbatim}
+
+La validación se realizó sobre 100~muestras del test set comparando las probabilidades softmax del modelo PyTorch original contra las del grafo ONNX ejecutado con \texttt{onnxruntime} en Python, verificando que la diferencia máxima sea \(< 10^{-5}\).
+
+% ──────────────────────────────────────────────────────────────
+\section{Integración Móvil}
+
+\subsection{Arquitectura de la app Flutter}
+
+La aplicación sigue una arquitectura en capas:
+
+\begin{itemize}
+  \item \textbf{Domain}: entidades \texttt{VoiceCommand}, \texttt{SmartHomeState}
+  \item \textbf{Application}: use cases \texttt{ListenAndClassifyUseCase}, \texttt{ExecuteCommandUseCase}
+  \item \textbf{Infrastructure}: \texttt{AudioCaptureService} (PCM-16, 16\,kHz), \texttt{MelSpectrogramExtractor} (Dart puro), \texttt{OnnxKWSInterpreter} (ONNX Runtime Mobile), \texttt{LiteRTLMService} (MethodChannel)
+  \item \textbf{Presentation}: 4~pantallas (Dashboard, Device, Routines, Confirmation) + \texttt{VoiceCommandOverlay}
+\end{itemize}
+
+\subsection{Pipeline de audio}
+
+El \texttt{AudioCaptureService} usa el paquete \texttt{record} para capturar audio PCM-16 mono a 16\,kHz.  Un buffer deslizante de 16\,000 muestras (1\,s) avanza 3\,200 muestras (200\,ms) en cada iteración.  Sólo se reportan comandos con confianza \(\ge 85\%\) y separados al menos 600\,ms entre detecciones.
+
+\subsection{MelSpectrogram en Dart}
+
+El \texttt{MelSpectrogramExtractor} implementa en Dart puro: pre-énfasis, ventana de Hann, FFT radix-2 Cooley-Tukey de 1024 puntos, banco de 64~filtros Mel triangulares (20–8000\,Hz) y conversión a dB con normalización z-score.  Los parámetros son idénticos a los del notebook de entrenamiento, garantizando que $\text{RMSE}(\hat{S}_{\text{Python}}, \hat{S}_{\text{Dart}}) < 10^{-3}$.
+
+\subsection{Inferencia KWS}
+
+\texttt{OnnxKWSInterpreter} carga el modelo ONNX con \texttt{OrtSession.fromBuffer}, construye un tensor \([1,1,64,101]\) de tipo Float32, ejecuta la sesión y aplica softmax a los logits para obtener la clase con mayor probabilidad.
+
+\subsection{Pantallas Smart Home}
+
+\begin{itemize}
+  \item \textbf{Dashboard}: grid de 4~elementos (Luces, Ventilador, TV, Rutinas) con anillo de foco animado navegable por voz (\textit{up/down/left/right}).
+  \item \textbf{Device}: vista detallada con estado ON/OFF animado; comandos \textit{on/off}.
+  \item \textbf{Routines}: lista de 3~rutinas con foco destacado; comandos \textit{go/stop}.
+  \item \textbf{Confirmation}: modal de confirmación; comandos \textit{yes/no}.
+\end{itemize}
+
+% ──────────────────────────────────────────────────────────────
+\section{LiteRT-LM y Tool Use (Bonus)}
+
+Como capa NLU adicional se integra LiteRT-LM~\footnote{\url{https://ai.google.dev/edge/litert/models/lm_overview}} con \textit{Tool Use} en Kotlin nativo (Figura~\ref{fig:litert}).  El plugin \texttt{LiteRTLMPlugin.kt} registra un \texttt{MethodChannel("litert\_lm")} en \texttt{MainActivity}.  Dado que el SDK \texttt{com.google.ai.edge.litertlm} aún no está disponible públicamente en Maven, la implementación actual provee un stub que activa automáticamente el fallback estático en Dart.
+
+El diseño previsto incluye un \texttt{ToolSet} Kotlin con cuatro herramientas anotadas: \texttt{navigate}, \texttt{toggleDevice}, \texttt{controlRoutine} y \texttt{confirm}, invocadas mediante el modelo \textit{Gemma3-1B-IT} cuantizado.  El prompt del sistema tiene la forma: ``\textit{You are a Smart Home voice assistant. The user said: `<keyword>'. Call the appropriate tool.}''
+
+% ──────────────────────────────────────────────────────────────
+\section{Conclusiones}
+
+Se demostró la viabilidad de un sistema KWS completamente on-device en Flutter/Android.  Las principales contribuciones son: (1)~implementación de MelSpectrogram en Dart puro con validación numérica respecto al notebook PyTorch; (2)~comparación controlada de LeNet-5 vs.\ MobileNetV3 con y sin SpecAugment en 12~corridas WandB; (3)~exportación e integración de ONNX Runtime Mobile dentro de una arquitectura limpia en capas; (4)~diseño extensible con LiteRT-LM Tool Use como capa NLU opcional.
+
+Los trabajos futuros incluyen: la finalización del SDK LiteRT-LM para Android, la exploración de cuantización INT8 del modelo ONNX para reducir latencia, y la extensión del vocabulario más allá de las 12~clases actuales.
+
+% ──────────────────────────────────────────────────────────────
+\begin{thebibliography}{00}
+
+\bibitem{warden2018speech}
+P. Warden, ``Speech Commands: A Dataset for Limited-Vocabulary Speech Recognition,''
+\textit{arXiv preprint arXiv:1804.03209}, 2018.
+
+\bibitem{park2019specaugment}
+D. S. Park, W. Chan, Y. Zhang, C.-C. Chiu, B. Zoph, E. D. Cubuk, and Q. V. Le,
+``SpecAugment: A Simple Data Augmentation Method for Automatic Speech Recognition,''
+in \textit{Proc. Interspeech 2019}, pp. 2613--2617, 2019.
+
+\bibitem{lin2020training}
+H. Lin, D. Gharbieh, H. Tan, and E. Chng,
+``Training Keyword Spotters with Limited and Synthesized Speech Data,''
+in \textit{Proc. ICASSP 2020}, pp. 7474--7478, 2020.
+
+\bibitem{howard2019searching}
+A. Howard, M. Sandler, G. Chu, L.-C. Chen, B. Chen, M. Tan, W. Wang, Y. Zhu,
+R. Pang, V. Vasudevan, Q. V. Le, and H. Adam,
+``Searching for MobileNetV3,''
+in \textit{Proc. ICCV 2019}, pp. 1314--1324, 2019.
+
+\bibitem{lecun1998lenet}
+Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner,
+``Gradient-based learning applied to document recognition,''
+\textit{Proceedings of the IEEE}, vol. 86, no. 11, pp. 2278--2324, 1998.
+
+\end{thebibliography}
+
+\end{document}

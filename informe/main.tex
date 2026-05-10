@@ -337,9 +337,8 @@ diagramas de bloques de cada arquitectura.
                 minimum width=1.1cm, minimum height=0.55cm, align=center},
     arr/.style={-{Stealth[length=3pt]}, thick}
   ]
-  \node[blk] (inp) {$1{\times}64{\times}101$};
   \node[blk, right=of inp] (c1) {Conv\\6@5$\times$5};
-  \node[blk, right=of c1]  (p1) {AvgPool\\2$\times$2};
+  \node[blk, right=of c1]  (p1) {AvgPool\\2$\times$2}; 
   \node[blk, right=of p1]  (c2) {Conv\\16@5$\times$5};
   \node[blk, right=of c2]  (p2) {AvgPool\\2$\times$2};
   \node[blk, right=of p2]  (f1) {FC\\120};
@@ -944,11 +943,6 @@ Q.~V.~Le,
 ``SpecAugment: A Simple Data Augmentation Method for Automatic Speech
 Recognition,''
 in \textit{Proc. Interspeech 2019}, pp.~2613--2617, 2019.
-
-\bibitem{lin2020training}
-H.~Lin, D.~Gharbieh, H.~Tan, and E.~Chng,
-``Training Keyword Spotters with Limited and Synthesized Speech Data,''
-in \textit{Proc. ICASSP 2020}, pp.~7474--7478, 2020.
 
 \bibitem{howard2019searching}
 A.~Howard et al.,

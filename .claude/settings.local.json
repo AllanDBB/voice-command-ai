@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c \"import pkg_resources; [print\\(p\\) for p in pkg_resources.working_set]\")"
+    ]
+  }
+}

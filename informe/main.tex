@@ -8,7 +8,6 @@
 
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
-\usepackage{algorithmic}
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
@@ -17,6 +16,10 @@
 \usepackage{multirow}
 \usepackage{listings}
 \usepackage{array}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
+\graphicspath{{figures/}}
 
 \lstset{
   basicstyle=\ttfamily\footnotesize,
@@ -26,22 +29,30 @@
   xrightmargin=2pt
 }
 
+\hyphenation{MobileNetV3 SpecAugment ONNX on-device}
+
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 
 \begin{document}
 
 % ─────────────────────────────────────────────────────────────
-\title{Reconocimiento de Comandos de Voz On-Device con ONNX Runtime Mobile
-       y LiteRT-LM en Flutter}
+\title{Reconocimiento de Comandos de Voz On-Device con ONNX Runtime Mobile en Flutter}
 
 \author{
-  \IEEEauthorblockN{Allan Díaz Barquero}
+  \IEEEauthorblockN{Allan Bolaños Barrientos}
   \IEEEauthorblockA{
     \textit{Escuela de Ingeniería en Computación} \\
     \textit{Instituto Tecnológico de Costa Rica} \\
     Cartago, Costa Rica \\
-    allandb@estudiantec.cr
+    a.bolanos.2@estudiantec.cr
+  } \and
+  \IEEEauthorblockN{José David Chaves Mena}
+  \IEEEauthorblockA{
+    \textit{Escuela de Ingeniería en Computación} \\
+    \textit{Instituto Tecnológico de Costa Rica} \\
+    Cartago, Costa Rica \\
+    j.chaves.3@estudiantec.cr
   }
 }
 
@@ -49,24 +60,24 @@
 
 % ─────────────────────────────────────────────────────────────
 \begin{abstract}
-Se presenta el diseño, entrenamiento e integración on-device de un sistema
-de reconocimiento de comandos de voz (\textit{Keyword Spotting}, KWS) en una
-aplicación Flutter para Android.  Se evalúan dos arquitecturas CNN sobre el
-Speech Commands Dataset~v2~\cite{warden2018speech}: LeNet-5 adaptado y
-MobileNetV3-Small~\cite{howard2019searching}, con y sin la técnica de
-aumentación SpecAugment~\cite{park2019specaugment}.  Se registran 12~corridas
-experimentales en Weights~\&~Biases (WandB).  El mejor modelo (MobileNetV3-Small
-con SpecAugment, configuración~B6) alcanza una \textbf{exactitud del 95.85\,\%}
-y \textbf{F1-macro de 0.9586} sobre 12~clases en el conjunto de prueba.  El
-modelo se exporta a ONNX~opset~17 e inferido con ONNX~Runtime~Mobile; la
-diferencia máxima en probabilidades softmax respecto al modelo PyTorch original
-es \(1.43 \times 10^{-6}\).  Como capa NLU adicional se integra LiteRT-LM con
-\textit{Tool~Use} en Kotlin nativo.  El sistema completo corre
-enteramente en el dispositivo sin dependencias de red.
+Los sistemas de reconocimiento de comandos de voz en dispositivos móviles
+requieren modelos compactos que operen en tiempo real sin acceso a la nube.
+En este trabajo se diseña, entrena e integra un pipeline completo de
+\textit{Keyword Spotting} (KWS) en una aplicación Flutter para Android, desde
+la captura de audio hasta la ejecución de acciones en una interfaz Smart Home.
+Se comparan dos arquitecturas CNN — LeNet-5 adaptado y MobileNetV3-Small — con
+y sin SpecAugment~\cite{park2019specaugment} sobre 12~clases del Speech
+Commands Dataset~v2~\cite{warden2018speech}, en un total de 12~corridas
+registradas en WandB.  El modelo ganador (MobileNetV3-Small + SpecAugment,
+configuración~B6) alcanza \textbf{95.85\,\% de exactitud} y
+\textbf{F1-macro de 0.9586} en el conjunto de prueba, exportado a
+ONNX~opset~17 con error numérico máximo de \(1.43 \times 10^{-6}\) respecto
+al modelo original.  El sistema opera íntegramente en el dispositivo sin
+dependencias de red.
 \end{abstract}
 
 \begin{IEEEkeywords}
-keyword spotting, on-device inference, ONNX Runtime Mobile, LiteRT-LM,
+keyword spotting, on-device inference, ONNX Runtime Mobile,
 MelSpectrogram, SpecAugment, MobileNetV3, Flutter, Smart Home
 \end{IEEEkeywords}
 
@@ -81,25 +92,45 @@ domótica reactiva.
 
 El presente trabajo diseña e implementa un pipeline completo, desde la captura
 de audio crudo hasta la ejecución de acciones en una interfaz Smart~Home,
-completamente on-device en un dispositivo Android de gama media.  El flujo de
-datos es:
+completamente on-device en un dispositivo Android de gama media.  La
+Figura~\ref{fig:pipeline} ilustra el flujo de datos del sistema.
 
-\[
-  \underbrace{\text{Micrófono}}_{\text{16\,kHz PCM-16}}
-  \xrightarrow{1\,\text{s}}
-  \underbrace{\text{MelSpec}}_{\text{Dart puro}}
-  \xrightarrow{64\times101}
-  \underbrace{\text{ONNX KWS}}_{\text{ORT Mobile}}
-  \xrightarrow{\text{keyword}}
-  \underbrace{\text{LiteRT-LM}}_{\text{Tool Use}}
-  \xrightarrow{}
-  \text{UI}
-\]
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=0.55cm and 0.4cm,
+    block/.style={
+      rectangle, rounded corners=3pt, draw=black, thick,
+      fill=blue!10, text centered, font=\footnotesize\bfseries,
+      minimum width=1.55cm, minimum height=0.7cm
+    },
+    sub/.style={font=\scriptsize, text=gray, text centered},
+    arrow/.style={-{Stealth[length=4pt]}, thick},
+    label/.style={font=\scriptsize\itshape, midway, above=1pt}
+  ]
+  \node[block] (mic)  {Micrófono};
+  \node[block, right=of mic] (mel)  {MelSpec};
+  \node[block, right=of mel] (kws)  {ONNX KWS};
+  \node[block, right=of kws] (ui)   {UI};
+
+  \node[sub, below=0.1cm of mic] {16\,kHz PCM-16};
+  \node[sub, below=0.1cm of mel] {Dart puro};
+  \node[sub, below=0.1cm of kws] {ORT Mobile};
+  \node[sub, below=0.1cm of ui]  {Smart Home};
+
+  \draw[arrow] (mic) -- node[label]{1\,s} (mel);
+  \draw[arrow] (mel) -- node[label]{$64{\times}101$} (kws);
+  \draw[arrow] (kws) -- node[label]{keyword} (ui);
+\end{tikzpicture}
+\caption{Pipeline de inferencia on-device.}
+\label{fig:pipeline}
+\end{figure}
 
 Se evalúan dos modelos CNN (Modelos~A y~B) en dos configuraciones de datos
 (base y aumentado), totalizando 12~corridas controladas con WandB.  El modelo
 ganador se integra en una aplicación Flutter con cuatro pantallas navegables
-íntegramente por comandos de voz.
+íntegramente por comandos de voz.  El código fuente completo está disponible
+en \url{https://github.com/AllanDBB/voice-command-ai}.
 
 Las contribuciones principales son:
 \begin{enumerate}
@@ -111,8 +142,42 @@ Las contribuciones principales son:
   \item Identificación y corrección de un bug de transposición de dimensiones
         en la representación plana del espectrograma que causaba predicciones
         degeneradas en producción.
-  \item Diseño extensible con LiteRT-LM Tool~Use como capa NLU opcional.
 \end{enumerate}
+
+% ─────────────────────────────────────────────────────────────
+\section{Estado del Arte}
+\label{sec:sota}
+
+El reconocimiento de comandos de voz con vocabulario restringido ha evolucionado
+desde sistemas basados en HMM hacia arquitecturas neuronales entrenadas
+end-to-end.  Zhang~et~al.~\cite{zhang2017hello} demostraron que redes
+convolucionales con separabilidad en profundidad (DS-CNN) son suficientes para
+alcanzar $\approx$94\,\% de exactitud en Speech Commands con modelos menores
+a 1~MB, abriendo la puerta a la inferencia en microcontroladores.
+
+La siguiente generación de modelos explotó la estructura temporal del
+espectrograma.  Choi~et~al.~\cite{choi2019temporal} propusieron TC-ResNet,
+que aplica convoluciones 1-D residuales directamente sobre la secuencia de
+frames Mel; TC-ResNet-14 alcanza \textbf{96.6\,\%} en Speech Commands~v2 con
+solo 305~K parámetros.  En paralelo, de~Andrade~et~al.~\cite{deandrade2018neural}
+incorporaron mecanismos de atención sobre representaciones LSTM, logrando
+94.1\,\% con mayor interpretabilidad.
+
+Con la adopción generalizada de transformers en audio,
+Berg~et~al.~\cite{berg2021keyword} obtuvieron 97.7\,\% aplicando
+\textit{self-attention} sobre parches del espectrograma.  El estado del arte
+más reciente corresponde a BC-ResNet~\cite{kim2021broadcasted}, que difunde
+activaciones a través del canal frecuencial para capturar dependencias
+espectrales globales; BC-ResNet-8 alcanza \textbf{98.7\,\%} en 12~clases.
+
+El presente trabajo se sitúa en el segmento de modelos ligeros orientados a
+inferencia on-device: MobileNetV3-Small con SpecAugment alcanza
+\textbf{95.85\,\%} de exactitud y \textbf{F1-macro de 0.9586}, resultado
+competitivo respecto a los trabajos reportados en la literatura, aunque bajo
+configuraciones experimentales no necesariamente idénticas en cuanto a split,
+número de clases y condiciones de evaluación.  La ventaja diferenciadora es
+la restricción adicional de correr íntegramente sin acceso a red en un
+dispositivo Android de gama media (Samsung Galaxy A71, Snapdragon 730G).
 
 % ─────────────────────────────────────────────────────────────
 \section{Dataset: Speech Commands v2}
@@ -137,7 +202,10 @@ extraídos de los archivos \texttt{\_background\_noise\_/} del dataset
 \texttt{\_unknown\_} se forma submuestreando palabras del dataset que no
 pertenecen a los diez comandos objetivo.  Ambas clases se dimensionan para
 igualar el promedio de muestras de los diez comandos, produciendo un conjunto
-\textbf{perfectamente balanceado}.
+\textbf{perfectamente balanceado}.  Cabe notar que este balance es artificial:
+en condiciones reales de uso, el silencio y el habla no-comando predominan
+ampliamente sobre los comandos activos, por lo que las métricas sobre el test
+set balanceado representan un escenario favorable respecto al despliegue real.
 
 \subsection{Estadísticas del split}
 
@@ -258,20 +326,66 @@ La elección de MobileNetV3 como Modelo B se justifica por su balance superior
 entre parámetros y capacidad representacional para problemas de clasificación
 sobre espectrogramas, respaldado por su diseño orientado a dispositivos de borde.
 
+Las Figuras~\ref{fig:arch_lenet} y~\ref{fig:arch_mobilenet} muestran los
+diagramas de bloques de cada arquitectura.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=0.25cm and 0.15cm,
+    blk/.style={rectangle, draw, fill=blue!10, font=\scriptsize,
+                minimum width=1.1cm, minimum height=0.55cm, align=center},
+    arr/.style={-{Stealth[length=3pt]}, thick}
+  ]
+  \node[blk] (inp) {$1{\times}64{\times}101$};
+  \node[blk, right=of inp] (c1) {Conv\\6@5$\times$5};
+  \node[blk, right=of c1]  (p1) {AvgPool\\2$\times$2};
+  \node[blk, right=of p1]  (c2) {Conv\\16@5$\times$5};
+  \node[blk, right=of c2]  (p2) {AvgPool\\2$\times$2};
+  \node[blk, right=of p2]  (f1) {FC\\120};
+  \node[blk, right=of f1]  (f2) {FC\\84};
+  \node[blk, right=of f2]  (out){FC\\12};
+  \foreach \a/\b in {inp/c1,c1/p1,p1/c2,c2/p2,p2/f1,f1/f2,f2/out}
+    \draw[arr] (\a) -- (\b);
+\end{tikzpicture}
+\caption{Diagrama de bloques — Modelo A (LeNet-5 adaptado).}
+\label{fig:arch_lenet}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=0.25cm and 0.15cm,
+    blk/.style={rectangle, draw, fill=green!10, font=\scriptsize,
+                minimum width=1.2cm, minimum height=0.55cm, align=center},
+    arr/.style={-{Stealth[length=3pt]}, thick}
+  ]
+  \node[blk] (inp) {$1{\times}64{\times}101$};
+  \node[blk, right=of inp] (c1) {Conv\\16@3$\times$3\\stride 2};
+  \node[blk, right=of c1]  (mb) {MBBlocks\\$\times$9\\(SE+HS)};
+  \node[blk, right=of mb]  (ap) {AdaptAvg\\Pool};
+  \node[blk, right=of ap]  (fc) {FC\\576$\to$12};
+  \foreach \a/\b in {inp/c1,c1/mb,mb/ap,ap/fc}
+    \draw[arr] (\a) -- (\b);
+\end{tikzpicture}
+\caption{Diagrama de bloques — Modelo B (MobileNetV3-Small adaptado).}
+\label{fig:arch_mobilenet}
+\end{figure}
+
 % ─────────────────────────────────────────────────────────────
 \section{Entrenamiento y Experimentos}
 
 \subsection{Configuración general}
 
-Todos los experimentos se ejecutaron con:
+Todos los experimentos se ejecutaron en Google Colaboratory\footnote{Notebook
+disponible en \url{https://colab.research.google.com/drive/1wB5JzLzsiDX3zOCLSiJivAgagG19_FxA}}
+con PyTorch~2.11.0, utilizando:
 \begin{itemize}
   \item Semilla de reproducibilidad \texttt{seed=42} en PyTorch, NumPy y
         el módulo \texttt{random}.
   \item Entrenamiento con AMP (\textit{Automatic Mixed Precision} FP16) y
         \textit{early stopping} con paciencia de 6~épocas sin mejora en
         \textit{val\_F1-macro}.
-  \item GPU NVIDIA RTX~4050 Laptop (CUDA~8.9, 6\,GB VRAM),
-        PyTorch~2.11.0+cu128.
   \item \texttt{batch\_size=64}, peso de regularización \texttt{weight\_decay}
         según corrida.
 \end{itemize}
@@ -303,10 +417,95 @@ B6 & MobileNetV3 & Aumentado & 1e-3 & 1e-3 \\
 \end{tabular}
 \end{table}
 
+\subsection{Rutinas de entrenamiento, validación y test}
+
+Cada corrida sigue el mismo ciclo: por cada época se recorre el
+\textit{train\_loader} con forward pass en AMP FP16, se calcula la pérdida
+$\mathcal{L}=\texttt{CrossEntropyLoss}(\hat{y},y)$ y se actualiza $\theta$
+con el optimizador correspondiente.  Al finalizar cada época se evalúa
+F1-macro sobre el \textit{val\_loader} sin gradientes; si el valor supera
+el mejor registrado se guarda $\theta^*$ y se reinicia el contador de
+paciencia, de lo contrario se incrementa.  Al alcanzar
+\texttt{patience}=6~épocas sin mejora el entrenamiento se interrumpe y se
+carga $\theta^*$.  El conjunto de test se evalúa \textbf{una única vez}
+con el modelo seleccionado, garantizando ausencia de fuga de información.
+
+La función de pérdida \texttt{CrossEntropyLoss} se aplica sin pesos de clase
+dado el balanceo perfecto del dataset.  Para LeNet-5 se usa SGD con momentum
+0.9; para MobileNetV3 se usa Adam con \texttt{CosineAnnealingLR(T\_max=30)}.
+El conjunto de test se evalúa \textbf{una única vez} con el mejor modelo
+seleccionado en validación, garantizando ausencia de fuga de información.
+
+\subsection{Criterio de selección de hiperparámetros}
+
+La búsqueda de hiperparámetros se planteó como una exploración controlada
+de rango reducido, no como una búsqueda exhaustiva.  Para cada modelo se
+fijaron tres valores de tasa de aprendizaje que cubren un orden de magnitud
+(e.g., $10^{-3}$, $5 \times 10^{-4}$, $10^{-4}$) y uno o dos valores de
+\textit{weight decay} elegidos con base en rangos típicos reportados en la
+literatura para modelos CNN de escala similar.  El criterio de parada fue
+\textit{early stopping} sobre \textit{val\_F1-macro} con paciencia de 6~épocas,
+lo que limita el riesgo de sobreajuste sin requerir búsqueda fina.  La selección
+final se realizó únicamente por \textit{F1-macro en validación}, sin acceder al
+conjunto de prueba hasta la evaluación definitiva.
+
 Las métricas registradas en WandB por epoch incluyen:
 \texttt{train/loss}, \texttt{train/acc}, \texttt{val/loss},
 \texttt{val/acc}, \texttt{val/f1\_macro} y la matriz de confusión
 $12 \times 12$ al finalizar cada corrida.
+
+\subsection{Análisis de convergencia y sobreajuste}
+
+Las Figuras~\ref{fig:lenet_curves} y~\ref{fig:mobilenet_curves} muestran las
+curvas de pérdida de entrenamiento y validación para los modelos LeNet-5 y
+MobileNetV3, respectivamente.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{wandb_lenet_curves.png}
+  \caption{Pérdida de entrenamiento y validación — LeNet-5 (A1--A6).}
+  \label{fig:lenet_curves}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{wandb_mobilenet_curves.png}
+  \caption{Pérdida de entrenamiento y validación — MobileNetV3-Small (B1--B6).}
+  \label{fig:mobilenet_curves}
+\end{figure}
+
+El análisis de las curvas permite identificar tres patrones distintos de
+ajuste:
+
+\textbf{Underfitting en LeNet-5 con SpecAugment (A4--A6).}  La pérdida de
+entrenamiento permanece elevada ($> 0.5$) y la brecha con validación es
+pequeña, lo que indica que el modelo no tiene suficiente capacidad para
+aprender la distribución de espectrogramas perturbados por SpecAugment.
+Esto explica por qué A4 (F1=0.7597) rinde peor que A1 (F1=0.8322):
+la regularización agresiva supera la capacidad representacional del modelo.
+
+\textbf{Convergencia aceptable en LeNet-5 base (A1--A3).}  Los runs con
+datos no aumentados muestran pérdida de entrenamiento más baja, pero con
+mayor varianza entre épocas en validación, sugiriendo cierta inestabilidad
+típica de SGD sin decaimiento agresivo.
+
+\textbf{Generalización adecuada en MobileNetV3 (B1--B6).}  La brecha entre
+pérdida de entrenamiento y validación es consistentemente pequeña en todos
+los runs, evidenciando que el modelo generaliza sin sobreajuste severo.
+El run B6 exhibe la convergencia más suave, atribuible a la combinación de
+SpecAugment (regularización de datos) y weight decay alto (1e-3), que actúan
+de forma complementaria.
+
+La Figura~\ref{fig:all_val_loss} compara la pérdida de validación de las
+12~corridas en un mismo eje, permitiendo visualizar la superioridad de la
+familia MobileNetV3 desde las primeras épocas.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{wandb_all_val_loss.png}
+  \caption{Pérdida de validación comparada — 12 corridas (WandB).}
+  \label{fig:all_val_loss}
+\end{figure}
 
 % ─────────────────────────────────────────────────────────────
 \section{Evaluación y Selección de Modelo}
@@ -339,6 +538,16 @@ ligeramente el rendimiento respecto al base (A1 vs.\ A4), posiblemente por
 insuficiente capacidad del modelo para generalizar con espectrogramas
 perturbados.  En MobileNetV3 la aumentación mejora de 0.9497 a 0.9586.
 
+La Figura~\ref{fig:finalists_f1} ilustra la evolución del \textit{F1-macro}
+de validación de los cuatro finalistas a lo largo del entrenamiento.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{wandb_finalists_val_f1.png}
+  \caption{\texttt{val\_f1\_macro} de los cuatro modelos finalistas (A1, A4, B3, B6).}
+  \label{fig:finalists_f1}
+\end{figure}
+
 \subsection{Reporte por clase — Modelo B6}
 
 \begin{table}[htbp]
@@ -367,9 +576,102 @@ go            & 0.93 & 0.93 & 0.93 & 402 \\
 \end{tabular}
 \end{table}
 
-El modelo presenta un desempeño homogéneo en todas las clases; la clase con
-menor F1 es \texttt{\_unknown\_} (0.90), lo cual es esperado dado que agrupa
-un amplio espacio acústico bajo una sola etiqueta.
+\subsection{Matriz de confusión — Modelo B6}
+
+La Figura~\ref{fig:confmat} presenta la matriz de confusión normalizada del
+modelo B6 sobre el conjunto de prueba completo (4\,888 muestras).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\columnwidth]{confmat_b6.png}
+  \caption{Matriz de confusión normalizada — Modelo B6 (test set).}
+  \label{fig:confmat}
+\end{figure}
+
+El análisis de la matriz revela tres patrones principales:
+
+\begin{enumerate}
+  \item \textbf{Clase \texttt{\_unknown\_} (recall 0.93):} es la única clase
+        con confusiones distribuidas entre múltiples comandos, reflejando
+        la heterogeneidad fonética del espacio ``desconocido''.
+
+  \item \textbf{Pares fonéticamente similares:} se observa confusión residual
+        entre \texttt{no}/\texttt{go} y entre \texttt{on}/\texttt{no},
+        ambas dentro de un margen de $\leq 3\,\%$ de error.
+
+  \item \textbf{Clases perfectas:} \texttt{\_silence\_}, \texttt{right} y
+        \texttt{stop} alcanzan recall $\geq 0.97$, beneficiándose de su perfil
+        espectral claramente diferenciado.
+\end{enumerate}
+
+\subsection{Comportamiento en dispositivo móvil}
+
+Se realizó una captura sistemática de predicciones en el Samsung Galaxy~A71
+(Android~13, Snapdragon 730G) pronunciando cada uno de los 10~comandos
+10~veces consecutivas en un entorno de oficina con ruido ambiental moderado.
+El log se obtuvo redirigiendo la salida de \texttt{flutter run} con:
+
+\begin{lstlisting}
+flutter run -d R58NB161L5Y 2>&1 | Select-String "[KWS] pred=" | Tee-Object mobile_log.txt
+\end{lstlisting}
+
+El archivo contiene \textbf{840~predicciones} totales (ventanas de 200\,ms).
+La Figura~\ref{fig:confmat_mobile} muestra la matriz de confusión
+normalizada por fila, construida asignando ground truth a cada bloque
+temporal separado por silencios.
+
+\begin{figure}[!h]
+  \centering
+  \includegraphics[width=\columnwidth]{confmat_mobile.png}
+  \caption{Matriz de confusión normalizada — dispositivo físico
+           (Samsung Galaxy A71, 840 ventanas totales).}
+  \label{fig:confmat_mobile}
+\end{figure}
+
+\textbf{Análisis cuantitativo.}
+Nueve de los diez comandos alcanzan recall~$\geq 0.957$, comparables con
+los resultados del test set estático (F1-macro 0.9586).  La excepción es
+\texttt{on}, con recall de \textbf{0.37}: el 42\,\% de las ventanas
+activas se clasifican como \texttt{off}, reflejo de la similitud acústica
+entre ambas palabras (misma vocal inicial corta ``o'', misma duración).
+Esta misma confusión on/off es un límite conocido de los modelos
+KWS entrenados solo con datos grabados en estudio sin hard-negative mining
+entre pares fonemicamente similares.
+
+\textbf{Comparación con test set estático.}
+La Tabla~\ref{tab:static_vs_mobile} compara el recall del test set
+(Google Speech Commands v2) con el recall en dispositivo por comando.
+
+\begin{table}[!h]
+\caption{Recall por comando: test set vs.\ dispositivo físico}
+\label{tab:static_vs_mobile}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Comando & Test set & Dispositivo \\
+\midrule
+yes   & 0.99 & 1.00 \\
+no    & 0.97 & 0.98 \\
+up    & 0.96 & 1.00 \\
+down  & 0.98 & 0.98 \\
+left  & 0.97 & 1.00 \\
+right & 0.99 & 1.00 \\
+on    & 0.94 & 0.37 \\
+off   & 0.98 & 0.96 \\
+stop  & 0.99 & 1.00 \\
+go    & 0.96 & 0.98 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+El degradé de \texttt{on} en dispositivo (0.94 $\to$ 0.37) no se aprecia
+en el test set estático porque las grabaciones de Speech Commands v2
+tienen condiciones acústicas controladas.  En el entorno real, la vocal
+inicial es más breve y el contexto reverberante del micrófono del
+smartphone aumenta la similitud espectral con \texttt{off}.
+Los demás comandos mantienen o superan el recall del test set,
+lo que valida la robustez del pipeline de preprocesamiento Mel en Dart
+y la exportación ONNX sin pérdida de precisión numérica significativa.
 
 % ─────────────────────────────────────────────────────────────
 \section{Exportación ONNX y Validación Numérica}
@@ -403,24 +705,67 @@ sobre 100~muestras aleatorias del test set:
 % ─────────────────────────────────────────────────────────────
 \section{Integración Móvil}
 
+\subsection{Características del despliegue}
+
+\begin{table}[htbp]
+\caption{Métricas del despliegue on-device}
+\label{tab:deploy}
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Parámetro} & \textbf{Valor} \\
+\midrule
+Dispositivo          & Samsung Galaxy A71 (SM-A715F) \\
+SoC                  & Snapdragon 730G (8nm) \\
+SO                   & Android 13 \\
+Tamaño del modelo    & 5.63\,MB (ONNX opset 17) \\
+Parámetros           & 1\,529\,868 (FP32) \\
+Ventana de análisis  & 1\,s (16\,000 muestras) \\
+Stride               & 200\,ms (3\,200 muestras) \\
+Tasa de inferencia   & $\leq$5 ventanas/s (VAD filtra silencio) \\
+Cooldown             & 1\,200\,ms entre detecciones válidas \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+La latencia individual de inferencia no fue medida instrumentalmente; trabajo
+futuro incluye la instrumentación con \texttt{SystemClock.elapsedRealtimeNanos}
+para reportar latencia media y percentil~95 por ventana.  La
+Figura~\ref{fig:app_screenshot} muestra la aplicación en funcionamiento sobre
+el dispositivo físico.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.72\columnwidth]{app_screenshot.png}
+  \caption{Aplicación Flutter ejecutándose en Samsung Galaxy A71.}
+  \label{fig:app_screenshot}
+\end{figure}
+
 \subsection{Arquitectura de la aplicación Flutter}
 
 La aplicación sigue una arquitectura de capas alineada con \textit{Clean
-Architecture}:
+Architecture}.  La Tabla~\ref{tab:arch} resume las responsabilidades de cada
+componente.
 
-\begin{itemize}
-  \item \textbf{Domain}: entidades \texttt{VoiceCommand} y
-        \texttt{SmartHomeState}.  \texttt{VoiceCommand} encapsula la etiqueta,
-        confianza y \textit{timestamp} de la detección.
-  \item \textbf{Application}: \texttt{ListenAndClassifyUseCase} (ventana
-        deslizante + VAD) y \texttt{ExecuteCommandUseCase} (mapeo
-        keyword~$\rightarrow$~acción).
-  \item \textbf{Infrastructure}: \texttt{AudioCaptureService},
-        \texttt{MelSpectrogramExtractor}, \texttt{OnnxKWSInterpreter},
-        \texttt{LiteRTLMService}.
-  \item \textbf{Presentation}: cuatro pantallas y widgets de estado de voz.
-        Gestión de estado con \texttt{provider}.
-\end{itemize}
+\begin{table}[htbp]
+\caption{Componentes de la aplicación Flutter}
+\label{tab:arch}
+\centering
+\begin{tabular}{p{2.2cm}p{5.4cm}}
+\toprule
+\textbf{Componente} & \textbf{Responsabilidad} \\
+\midrule
+\texttt{VoiceCommand} & Entidad: etiqueta, confianza, timestamp \\
+\texttt{SmartHomeState} & Estado inmutable de la interfaz domótica \\
+\texttt{ListenAndClassify\-UseCase} & Buffer deslizante, VAD y orquestación de inferencia \\
+\texttt{ExecuteCommand\-UseCase} & Mapeo keyword $\rightarrow$ \texttt{SmartHomeAction} \\
+\texttt{AudioCapture\-Service} & Captura PCM-16 a 16\,kHz vía \texttt{record} \\
+\texttt{MelSpectrogram\-Extractor} & FFT + banco Mel + normalización z-score en Dart puro \\
+\texttt{OnnxKWS\-Interpreter} & Carga y ejecución de sesión ONNX Runtime Mobile \\
+\texttt{VoiceCommand\-Provider} & Estado global de la UI con \texttt{provider} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Pipeline de audio}
 
@@ -438,8 +783,8 @@ final samples = List<int>.generate(
 Un buffer deslizante de 16\,000 muestras (1~s) avanza 3\,200 muestras
 (200\,ms) por iteración.  Antes de ejecutar el modelo se aplica un \textit{VAD}
 basado en energía RMS con umbral de $0.008$ (\(\approx -42\,\text{dBFS}\)) para
-descartar ventanas silenciosas y evitar predicciones espurias.  El período de
-enfriamiento entre detecciones válidas es de \textbf{1\,200\,ms}.
+descartar ventanas silenciosas.  El período de enfriamiento entre detecciones
+válidas es de \textbf{1\,200\,ms}.
 
 \subsection{MelSpectrogram en Dart}
 
@@ -456,8 +801,6 @@ el índice plano para el bin de Mel $m$ y la ventana temporal $t$ es:
   \text{idx} = m \times n_\text{frames} + t
   \label{eq:layout}
 \end{equation}
-
-Esto se detalla en la Sección~\ref{sec:bugs}.
 
 \subsection{Inferencia KWS}
 
@@ -509,9 +852,8 @@ Confirmación
 
 Durante las pruebas en dispositivo físico (Samsung Galaxy A71, Android~13) el
 modelo predecía \texttt{\_silence\_} con confianza $> 0.999$ para cualquier
-entrada de audio real, incluso cuando el modelo lograba F1-macro de 0.9586 en
-el test set.  La causa fue identificada como una \textbf{transposición de las
-dimensiones del espectrograma en el tensor plano}.
+entrada de audio real.  La causa fue identificada como una \textbf{transposición
+de las dimensiones del espectrograma en el tensor plano}.
 
 El tensor de PyTorch con forma $[1,1,64,101]$ usa almacenamiento
 row-major: la dimensión de Mel ($n_\text{mels}=64$) es la dimensión lenta y la
@@ -530,9 +872,6 @@ result[outIdx++] = normalizedDb;
 result[m * nFrames + t] = normalizedDb;
 \end{lstlisting}
 
-Tras esta corrección, el sistema detectó correctamente las doce clases en
-dispositivo físico.
-
 \subsection{Decodificación incorrecta de PCM-16}
 
 El paquete \texttt{record} entrega los datos de audio como bytes crudos.  Una
@@ -545,34 +884,27 @@ usando \texttt{ByteData.getInt16}.
 
 El modelo inicial fue entrenado solo con los 10~comandos de control.  Sin las
 clases \texttt{\_silence\_} y \texttt{\_unknown\_}, el modelo estaba forzado a
-asignar toda entrada (incluido el silencio y el habla no-comando) a una de las
-diez clases, produciendo detecciones espurias de alta confianza.  La
-introducción de las dos clases auxiliares redujo la tasa de falsos positivos y
-mejoró la utilidad práctica del sistema.
+asignar toda entrada a una de las diez clases, produciendo detecciones espurias
+de alta confianza.  La introducción de las dos clases auxiliares redujo la tasa
+de falsos positivos y mejoró la utilidad práctica del sistema.
 
 % ─────────────────────────────────────────────────────────────
-\section{LiteRT-LM y Tool Use (Bonus)}
+\section{Trabajo Exploratorio: LiteRT-LM (Bonus)}
 
-Como capa NLU adicional se diseñó la integración de LiteRT-LM con
-\textit{Tool~Use} en Kotlin nativo.  El plugin \texttt{LiteRTLMPlugin.kt}
-registra un \texttt{MethodChannel("litert\_lm")} en \texttt{MainActivity}.
-El \texttt{ToolSet} Kotlin define cuatro herramientas anotadas:
+Como extensión no requerida, se exploró la posibilidad de agregar una capa
+NLU basada en LiteRT-LM con \textit{Tool Use}.  Se diseñó la interfaz de
+integración completa: el plugin \texttt{LiteRTLMPlugin.kt} registra un
+\texttt{MethodChannel("litert\_lm")} en \texttt{MainActivity}, y el
+\texttt{ToolSet} Kotlin define cuatro herramientas tipadas:
 \texttt{navigate}, \texttt{toggleDevice}, \texttt{controlRoutine} y
 \texttt{confirm}.
 
-El sistema de prompts tiene la forma:
-\begin{quote}
-\textit{``You are a Smart Home voice assistant. The user said: `<keyword>'.
-Call the appropriate tool.''}
-\end{quote}
-
-El modelo destino es \textit{Gemma3-1B-IT} cuantizado
-(\texttt{litert-community/Gemma3-1B-IT} en HuggingFace).  Dado que el SDK
-\texttt{com.google.ai.edge.litertlm} no se encontraba disponible públicamente
-en Maven Central al momento del desarrollo, la implementación provee un
-\textit{stub} Kotlin que activa automáticamente el fallback estático en Dart,
-el cual mapea directamente cada keyword a su acción correspondiente mediante
-una tabla de conversión.
+Sin embargo, el SDK \texttt{com.google.ai.edge.litertlm} no se encontraba
+disponible públicamente en Maven Central al momento del desarrollo.  Por
+ello, \textbf{la integración no fue ejecutada en el dispositivo}: el plugin
+provee un stub que activa automáticamente el fallback estático en Dart,
+manteniendo el comportamiento funcional del sistema sin la capa NLU.  La
+arquitectura queda preparada para incorporar el SDK cuando esté disponible.
 
 % ─────────────────────────────────────────────────────────────
 \section{Conclusiones}
@@ -594,16 +926,9 @@ Los hallazgos más relevantes del trabajo son:
         detecciones espurias continuas en entornos reales.
 
   \item \textbf{La consistencia del pipeline de preprocesamiento es crítica}:
-        el bug de transposición no fue detectable en pruebas de unidad sobre
-        datos del dataset, sino únicamente al integrar el sistema end-to-end
-        en el dispositivo real.  Esto subraya la importancia de las pruebas de
-        integración en aplicaciones ML embebidas.
+        el bug de transposición no fue detectable en pruebas de unidad, sino
+        únicamente al integrar el sistema end-to-end en el dispositivo real.
 \end{enumerate}
-
-Los trabajos futuros incluyen: finalización del SDK LiteRT-LM para Android,
-cuantización INT8 del modelo ONNX para reducir latencia y tamaño, extensión del
-vocabulario mediante transferencia de aprendizaje, y evaluación con hablantes
-de español como lengua materna.
 
 % ─────────────────────────────────────────────────────────────
 \begin{thebibliography}{00}
@@ -626,8 +951,7 @@ H.~Lin, D.~Gharbieh, H.~Tan, and E.~Chng,
 in \textit{Proc. ICASSP 2020}, pp.~7474--7478, 2020.
 
 \bibitem{howard2019searching}
-A.~Howard, M.~Sandler, G.~Chu, L.-C.~Chen, B.~Chen, M.~Tan, W.~Wang,
-Y.~Zhu, R.~Pang, V.~Vasudevan, Q.~V.~Le, and H.~Adam,
+A.~Howard et al.,
 ``Searching for MobileNetV3,''
 in \textit{Proc. ICCV 2019}, pp.~1314--1324, 2019.
 
@@ -635,6 +959,31 @@ in \textit{Proc. ICCV 2019}, pp.~1314--1324, 2019.
 Y.~LeCun, L.~Bottou, Y.~Bengio, and P.~Haffner,
 ``Gradient-based learning applied to document recognition,''
 \textit{Proceedings of the IEEE}, vol.~86, no.~11, pp.~2278--2324, 1998.
+
+\bibitem{zhang2017hello}
+T.~Zhang et al.,
+``Hello Edge: Keyword Spotting on Microcontrollers,''
+\textit{arXiv preprint arXiv:1711.07128}, 2017.
+
+\bibitem{choi2019temporal}
+S.~Choi et al.,
+``Temporal Convolution for Real-time Keyword Spotting on Mobile Devices,''
+in \textit{Proc. Interspeech 2019}, pp.~3372--3376, 2019.
+
+\bibitem{deandrade2018neural}
+D.~C.~de~Andrade, S.~Leo, M.~L.~D.~S.~Viana, and C.~Bernkopf,
+``A Neural Attention Model for Speech Command Recognition,''
+\textit{arXiv preprint arXiv:1808.08929}, 2018.
+
+\bibitem{berg2021keyword}
+A.~Berg, M.~O'Connor, and M.~T.~Cruz,
+``Keyword Transformer: A Self-Attention Model for Keyword Spotting,''
+in \textit{Proc. Interspeech 2021}, pp.~4249--4253, 2021.
+
+\bibitem{kim2021broadcasted}
+B.~Kim and H.~Kim,
+``Broadcasted Residual Learning for Efficient Keyword Spotting,''
+in \textit{Proc. Interspeech 2021}, pp.~4538--4542, 2021.
 
 \end{thebibliography}
 
